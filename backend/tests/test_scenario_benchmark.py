@@ -1,6 +1,13 @@
 import pytest
 from app.services.scenario_benchmark import ScenarioBenchmarkRunner
-from app.models.contracts import ScenarioType, MechanismState
+from app.models.contracts import (
+    ScenarioType,
+    MechanismState,
+    BlockageEventContract,
+    PredictionContract,
+    ActuatorDirectiveContract,
+)
+from app.services.state_store import state_store
 
 
 def test_scenario_runner_gradual_debris_to_intervention():
@@ -27,3 +34,58 @@ def test_benchmarking_metrics_computation():
 
     benchmark = runner.intervention
     assert runner.simulation_time_s >= 30.0
+
+
+
+def test_starting_new_scenario_clears_previous_active_blockage():
+    runner = ScenarioBenchmarkRunner()
+
+    previous_blockage = BlockageEventContract(
+        section_id="SEC_SCREENING",
+        probable_segment="PRIMARY_SCREENING_NET",
+        severity=0.8,
+        confidence=0.9,
+        differential_head_cm=4.0,
+        estimated_flow_drop_lpm=3.0,
+        is_active=True,
+    )
+    state_store.record_blockage(previous_blockage)
+
+    runner.start_scenario(ScenarioType.CLEAN_DRAINAGE, seed=42)
+
+    assert state_store.get_active_blockage() is None
+
+
+
+def test_starting_new_scenario_clears_previous_prediction():
+    runner = ScenarioBenchmarkRunner()
+
+    state_store.set_prediction(
+        PredictionContract(
+            section_id="SEC_SCREENING",
+            ttc_seconds=120.0,
+            confidence=0.9,
+            projected_level_cm=25.0,
+        )
+    )
+
+    runner.start_scenario(ScenarioType.CLEAN_DRAINAGE, seed=42)
+
+    assert state_store.get_prediction() is None
+
+
+def test_starting_new_scenario_clears_previous_gate_directive():
+    runner = ScenarioBenchmarkRunner()
+
+    state_store.set_gate_directive(
+        ActuatorDirectiveContract(
+            gate_target_angle=90.0,
+            action="DIVERT_FLOW",
+            reason="Previous scenario diversion",
+            emergency_stop=True,
+        )
+    )
+
+    runner.start_scenario(ScenarioType.CLEAN_DRAINAGE, seed=42)
+
+    assert state_store.get_gate_directive() is None

@@ -380,5 +380,15 @@ class StateStore:
             return incident
 
 
+    def clear_scenario_outputs(self) -> None:
+        """Clear scenario-specific blockage, prediction, and actuator output state."""
+        with self._lock:
+            if self._active_blockage:
+                self._active_blockage.is_active = False
+            self._active_blockage = None
+            self._latest_prediction = None
+            self._latest_gate_directive = None
+
 # Global singleton store instance
 state_store = StateStore()
+

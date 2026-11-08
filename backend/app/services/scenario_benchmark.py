@@ -49,6 +49,7 @@ class ScenarioBenchmarkRunner:
         self.simulation_time_s = 0.0
         self.is_running = True
 
+        state_store.clear_scenario_outputs()
         self.mechanism.manual_reset()
         self.channel = HydraulicChannelSimulator(seed=seed)
         self.intervention = InterventionEngine(self.mechanism)
@@ -240,3 +241,5 @@ class ScenarioBenchmarkRunner:
 
 
 scenario_runner = ScenarioBenchmarkRunner()
+
+
