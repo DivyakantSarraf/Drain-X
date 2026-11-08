@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+**/node_modules/
+**/__pycache__/
+**/.pytest_cache/
+**/.venv/
+**/venv/
+**/dist/
+**/.dart_tool/
+**/build/
+*.log
+
+# User-uploaded incident evidence
+backend/uploads/
