@@ -50,3 +50,21 @@ def test_manual_mechanism_trigger_and_reset(client: TestClient):
     # Reset
     reset_resp = client.post("/api/v1/simulation/mechanism/reset")
     assert reset_resp.status_code == 200
+
+def test_halted_scenario_does_not_advance_on_step(client: TestClient):
+    client.post(
+        "/api/v1/simulation/start",
+        json={"scenario": "GRADUAL_DEBRIS", "seed": 42},
+    )
+    client.post("/api/v1/simulation/step?dt=0.5")
+
+    client.post("/api/v1/simulation/stop")
+    halted_state = client.get("/api/v1/simulation/state").json()
+    halted_time = halted_state["simulation_time_s"]
+
+    step_resp = client.post("/api/v1/simulation/step?dt=1.0")
+    assert step_resp.status_code == 200
+
+    final_state = client.get("/api/v1/simulation/state").json()
+    assert final_state["simulation_time_s"] == halted_time
+    assert final_state["is_running"] is False

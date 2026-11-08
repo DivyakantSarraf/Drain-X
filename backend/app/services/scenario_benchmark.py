@@ -103,6 +103,13 @@ class ScenarioBenchmarkRunner:
         Executes a discrete time-step of the active scenario.
         Updates hydraulics, mechanism kinematics, analytics, fault detection, and benchmarking.
         """
+        if not self.is_running and self.current_scenario is not None:
+            return {
+                "time_s": self.simulation_time_s,
+                "scenario": self.current_scenario.value,
+                "status": "HALTED",
+            }
+
         if not self.is_running and self.current_scenario is None:
             # Standby stepping
             readings = self.channel.generate_telemetry()
