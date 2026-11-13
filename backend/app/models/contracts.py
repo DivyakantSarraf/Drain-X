@@ -11,6 +11,25 @@ class DataSource(str, Enum):
     REPLAY = "REPLAY"
 
 
+class OperationalMode(str, Enum):
+    SIMULATION = "SIMULATION"
+    PHYSICAL = "PHYSICAL"
+    SAFE_HOLD = "SAFE_HOLD"
+    HARDWARE = "HARDWARE"  # Backward-compatible alias for PHYSICAL
+
+
+class ModeTransitionRequest(BaseModel):
+    mode: str = Field(..., description="Target operational mode: SIMULATION, PHYSICAL, SAFE_HOLD, or HARDWARE")
+    reason: Optional[str] = Field(default="Manual operational mode transition", description="Auditable operator or automated trigger reason")
+
+
+class ModeTransitionRecord(BaseModel):
+    from_mode: str
+    to_mode: str
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    reason: str
+
+
 class SensorHealthStatus(str, Enum):
     OK = "OK"
     DEGRADED = "DEGRADED"
@@ -258,7 +277,7 @@ class SystemStatusContract(BaseModel):
     Overall system health, operational mode, and sensor inventory contract.
     """
     system_name: str = "DRAIN-X"
-    mode: Literal["SIMULATION", "HARDWARE"] = "SIMULATION"
+    mode: OperationalMode | str = OperationalMode.SIMULATION
     operational_state: SystemOperationalState = SystemOperationalState.MONITORING
     uptime_seconds: float = 0.0
     active_alerts_count: int = 0
@@ -382,3 +401,55 @@ def validate_incident_status_transition(current_status: IncidentStatus, new_stat
         return True
     allowed = VALID_STATUS_TRANSITIONS.get(current_status, set())
     return new_status in allowed
+
+
+class TelemetryStreamEventType(str, Enum):
+    INIT = "INIT"
+    TELEMETRY = "TELEMETRY"
+    HEARTBEAT = "HEARTBEAT"
+    PONG = "PONG"
+    FILTER_ACK = "FILTER_ACK"
+    ERROR = "ERROR"
+
+
+class TelemetryStreamEvent(BaseModel):
+    """
+    Standardized live telemetry stream broadcast event.
+    Broadcast to connected WebSocket/SSE clients in real time.
+    """
+    event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    event_type: TelemetryStreamEventType = TelemetryStreamEventType.TELEMETRY
+    timestamp: datetime = Field(default_factory=utc_now)
+    sensor_id: str
+    section_id: str
+    source: DataSource
+    operational_mode: str
+    sensor_type: SensorType
+    value: float
+    unit: str
+    water_level_cm: Optional[float] = None
+    flow_rate_lpm: Optional[float] = None
+    cumulative_volume_liters: Optional[float] = None
+    sensor_status: SensorHealthStatus = SensorHealthStatus.OK
+    is_valid: bool = True
+    fault_code: Optional[str] = None
+    hardware_validation_stage: Optional[str] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class StreamInitMessage(BaseModel):
+    """
+    Initialization handshake payload transmitted to newly connected stream clients.
+    """
+    event_type: str = "INIT"
+    protocol_version: str = "1.0"
+    client_id: str
+    connection_time: datetime = Field(default_factory=utc_now)
+    operational_mode: str
+    hardware_validation_stage: Optional[str] = None
+    latest_snapshot: dict[str, Any] = Field(default_factory=dict)
+    subscribed_source: Optional[str] = None
+    subscribed_sensor: Optional[str] = None
+    message: str = "Connected to DRAIN-X live telemetry stream"
+    stream_config: dict[str, Any] = Field(default_factory=dict)
+

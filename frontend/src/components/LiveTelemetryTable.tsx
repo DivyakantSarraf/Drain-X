@@ -1,12 +1,13 @@
 import React from 'react';
-import { SensorReadingContract } from '../types/contracts';
-import { RefreshCw, Database } from 'lucide-react';
+import { SensorReadingContract, StreamConnectionStatus } from '../types/contracts';
+import { RefreshCw, Database, Radio } from 'lucide-react';
 
 interface LiveTelemetryTableProps {
   readings: Record<string, SensorReadingContract>;
   isLoading: boolean;
   error: string | null;
   onRefresh: () => void;
+  streamStatus?: StreamConnectionStatus;
 }
 
 export const LiveTelemetryTable: React.FC<LiveTelemetryTableProps> = ({
@@ -14,6 +15,7 @@ export const LiveTelemetryTable: React.FC<LiveTelemetryTableProps> = ({
   isLoading,
   error,
   onRefresh,
+  streamStatus,
 }) => {
   const readingList = Object.values(readings);
 
@@ -28,6 +30,18 @@ export const LiveTelemetryTable: React.FC<LiveTelemetryTableProps> = ({
           <span className="text-[10px] bg-slate-800 text-cyan-300 px-2 py-0.5 rounded border border-slate-700">
             {readingList.length} CHANNELS
           </span>
+          {streamStatus && (
+            <span
+              className={`text-[9px] px-1.5 py-0.5 rounded uppercase font-bold flex items-center gap-1 ${
+                streamStatus === 'CONNECTED'
+                  ? 'bg-emerald-950/70 text-emerald-300 border border-emerald-800'
+                  : 'bg-amber-950/70 text-amber-300 border border-amber-800'
+              }`}
+            >
+              <Radio className="w-2.5 h-2.5" />
+              {streamStatus === 'CONNECTED' ? 'WS STREAM' : 'HTTP FALLBACK'}
+            </span>
+          )}
         </div>
         <button
           onClick={onRefresh}

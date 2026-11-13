@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Header } from './components/Header';
 import { DigitalTwin } from './components/DigitalTwin';
 import { ScenarioControls } from './components/ScenarioControls';
@@ -8,8 +8,18 @@ import { LiveTelemetryTable } from './components/LiveTelemetryTable';
 import { AlertsPanel } from './components/AlertsPanel';
 import { TelemetrySimulator } from './components/TelemetrySimulator';
 import { UrbanGisDashboard } from './components/gis/UrbanGisDashboard';
-import { apiClient, SimulationStateResponse } from './api/client';
-import { SensorReadingContract, AlertContract } from './types/contracts';
+import { HistoricalPlaybackDashboard } from './components/playback/HistoricalPlaybackDashboard';
+import {
+  apiClient,
+  SimulationStateResponse,
+  TelemetryStreamClient,
+  isReadingNewer,
+} from './api/client';
+import {
+  SensorReadingContract,
+  AlertContract,
+  StreamConnectionStatus,
+} from './types/contracts';
 
 export const App: React.FC = () => {
   const [simState, setSimState] = useState<SimulationStateResponse | null>(null);
@@ -19,20 +29,23 @@ export const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [isTogglingMode, setIsTogglingMode] = useState(false);
   const [resolvingAlertId, setResolvingAlertId] = useState<string | null>(null);
-  const [dashboardView, setDashboardView] = useState<'SCADA_TWIN' | 'GIS_FLOOD_MAP'>('SCADA_TWIN');
+  const [dashboardView, setDashboardView] = useState<'SCADA_TWIN' | 'HISTORICAL_PLAYBACK' | 'GIS_FLOOD_MAP'>('SCADA_TWIN');
+  const [streamStatus, setStreamStatus] = useState<StreamConnectionStatus>('DISCONNECTED');
+  const [lastEventTime, setLastEventTime] = useState<Date | null>(null);
+  const [dataFreshnessSec, setDataFreshnessSec] = useState<number | null>(null);
 
-  const fetchData = useCallback(async () => {
+  const streamClientRef = useRef<TelemetryStreamClient | null>(null);
+
+  // Background HTTP fetch for simulation analytics and alerts
+  const fetchSimulationAndAlerts = useCallback(async () => {
     try {
-      setError(null);
-      const [simRes, telemetryRes, alertsRes] = await Promise.all([
+      const [simRes, alertsRes] = await Promise.all([
         apiClient.getSimulationState(),
-        apiClient.getLatestTelemetry(),
         apiClient.getAlerts(true),
       ]);
-
       setSimState(simRes);
-      setReadings(telemetryRes.readings || {});
       setAlerts(alertsRes || []);
+      setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to connect to backend');
     } finally {
@@ -40,12 +53,103 @@ export const App: React.FC = () => {
     }
   }, []);
 
+  // HTTP Telemetry fallback query
+  const fetchHttpTelemetry = useCallback(async () => {
+    try {
+      const telemetryRes = await apiClient.getLatestTelemetry();
+      if (telemetryRes?.readings) {
+        setReadings((prev) => ({
+          ...prev,
+          ...telemetryRes.readings,
+        }));
+        setLastEventTime(new Date());
+      }
+    } catch {
+      // Ignored if handled elsewhere
+    }
+  }, []);
+
+  // Complete fetch on manual reload
+  const fetchData = useCallback(async () => {
+    await Promise.all([fetchSimulationAndAlerts(), fetchHttpTelemetry()]);
+  }, [fetchSimulationAndAlerts, fetchHttpTelemetry]);
+
+  // Real-time WebSocket Stream Subscription
   useEffect(() => {
+    const client = new TelemetryStreamClient({
+      onInit: (initMsg) => {
+        if (initMsg.latest_snapshot) {
+          setReadings((prev) => ({
+            ...prev,
+            ...initMsg.latest_snapshot,
+          }));
+        }
+        setLastEventTime(new Date());
+        setIsLoading(false);
+        setError(null);
+      },
+      onTelemetry: (reading) => {
+        setReadings((prev) => {
+          const existing = prev[reading.sensor_id];
+          if (!isReadingNewer(existing, reading)) {
+            return prev; // Discard stale/out-of-order reading
+          }
+          return {
+            ...prev,
+            [reading.sensor_id]: reading,
+          };
+        });
+        setLastEventTime(new Date());
+        setIsLoading(false);
+      },
+      onStatusChange: (status) => {
+        setStreamStatus(status);
+        if (status === 'POLLING_FALLBACK' || status === 'DISCONNECTED') {
+          // Immediately trigger HTTP poll when WebSocket stream drops
+          fetchHttpTelemetry();
+        }
+      },
+      onError: () => {
+        // Safe warning
+      },
+    });
+
+    streamClientRef.current = client;
+    client.connect();
+
+    // Initial HTTP state sync
     fetchData();
-    // Poll simulation & telemetry state every 1.5 seconds for fluid digital twin visualization
-    const interval = setInterval(fetchData, 1500);
+
+    return () => {
+      client.disconnect();
+      streamClientRef.current = null;
+    };
+  }, [fetchData, fetchHttpTelemetry]);
+
+  // Dynamic Polling Management:
+  // - When streaming (CONNECTED): only poll simulation/alerts every 3.5s (telemetry is pushed in real-time)
+  // - When disconnected or falling back: poll full telemetry + simulation every 1.5s
+  useEffect(() => {
+    const intervalMs = streamStatus === 'CONNECTED' ? 3500 : 1500;
+    const interval = setInterval(() => {
+      fetchSimulationAndAlerts();
+      if (streamStatus !== 'CONNECTED') {
+        fetchHttpTelemetry();
+      }
+    }, intervalMs);
+
     return () => clearInterval(interval);
-  }, [fetchData]);
+  }, [streamStatus, fetchSimulationAndAlerts, fetchHttpTelemetry]);
+
+  // Telemetry Freshness Tracker (1-second tick)
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (lastEventTime) {
+        setDataFreshnessSec(Math.max(0, (Date.now() - lastEventTime.getTime()) / 1000));
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [lastEventTime]);
 
   const handleToggleMode = async () => {
     if (!simState?.system) return;
@@ -74,9 +178,14 @@ export const App: React.FC = () => {
   };
 
   // Derive display values for Digital Twin
-  const upstreamDepth = readings['US_UPSTREAM_01']?.value || 4.8;
-  const weirHead = readings['US_WEIR_02']?.value || 1.2;
-  const pumpInflow = readings['PUMP_INFLOW_01']?.value || 5.0;
+  const upstreamDepth = readings['US_UPSTREAM_01']?.value ?? 4.8;
+  const weirHead = readings['US_WEIR_02']?.value ?? 1.2;
+  const pumpInflow = readings['PUMP_INFLOW_01']?.value ?? readings['FS_FLUME_01']?.value ?? 5.0;
+
+  const hardwareValidationStage =
+    (readings['US_UPSTREAM_01']?.metadata?.validation_stage as string) ||
+    (readings['FS_FLUME_01']?.metadata?.validation_stage as string) ||
+    null;
 
   return (
     <div className="min-h-screen bg-[#080c16] text-slate-100 flex flex-col font-sans bg-scada-grid">
@@ -88,6 +197,8 @@ export const App: React.FC = () => {
         isToggling={isTogglingMode}
         activeView={dashboardView}
         onChangeView={setDashboardView}
+        streamStatus={streamStatus}
+        dataFreshnessSec={dataFreshnessSec}
       />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-5">
@@ -104,16 +215,22 @@ export const App: React.FC = () => {
           </div>
         )}
 
-        {/* Operational KPI Matrix */}
-        <KpiCards status={simState?.system || null} />
+        {/* Operational KPI Matrix (Hidden in historical playback to avoid live metrics confusion) */}
+        {dashboardView !== 'HISTORICAL_PLAYBACK' && (
+          <KpiCards status={simState?.system || null} />
+        )}
 
-        {/* Dynamic View Switch: GIS Map vs SCADA Twin */}
+        {/* Dynamic View Switch: GIS Map vs Historical Playback vs SCADA Twin */}
         {dashboardView === 'GIS_FLOOD_MAP' ? (
           <UrbanGisDashboard
             systemStatus={simState?.system || null}
             readings={readings}
             activeAlertsCount={alerts.length}
             onNavigateToTwin={() => setDashboardView('SCADA_TWIN')}
+          />
+        ) : dashboardView === 'HISTORICAL_PLAYBACK' ? (
+          <HistoricalPlaybackDashboard
+            onReturnToLive={() => setDashboardView('SCADA_TWIN')}
           />
         ) : (
           <>
@@ -130,6 +247,7 @@ export const App: React.FC = () => {
                 gateDirective={simState.system.active_gate_directive}
                 readings={readings}
                 activeAlertsCount={alerts.length}
+                hardwareValidationStage={hardwareValidationStage}
               />
             )}
 
@@ -151,6 +269,7 @@ export const App: React.FC = () => {
                   isLoading={isLoading}
                   error={error}
                   onRefresh={fetchData}
+                  streamStatus={streamStatus}
                 />
               </div>
               <div className="lg:col-span-1">

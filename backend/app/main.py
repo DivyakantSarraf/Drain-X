@@ -3,10 +3,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.config import settings
+from app.core.config import settings, validate_production_configuration
 from app.api.v1.router import api_v1_router
 from app.services.state_store import state_store
 from app.services.scenario_benchmark import scenario_runner
+from app.services.telemetry_stream_manager import telemetry_stream_manager
 from app.models.contracts import (
     SensorReadingContract,
     SensorType,
@@ -17,11 +18,20 @@ from app.models.contracts import (
 
 
 async def simulation_background_loop():
-    """Background task to advance active scenario simulation in real-time."""
+    """
+    Background task to advance active scenario simulation in real-time.
+    Explicitly guarded by operational mode: only runs when in SIMULATION mode.
+    Cannot run or mutate state when in PHYSICAL or SAFE_HOLD mode.
+    """
     while True:
         try:
-            if scenario_runner.is_running:
+            if state_store.is_simulation() and scenario_runner.is_running:
                 scenario_runner.step(dt=0.5)
+                if scenario_runner.last_step_telemetry:
+                    await telemetry_stream_manager.broadcast_readings(
+                        readings=scenario_runner.last_step_telemetry,
+                        operational_mode=state_store.mode,
+                    )
             await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             break
@@ -35,7 +45,11 @@ async def lifespan(app: FastAPI):
     """
     Application Lifespan Manager.
     Seeds initial baseline sensors and starts background simulation loop.
+    Enforces production fail-closed configuration validation.
     """
+    # Enforce strict fail-closed configuration validation in production
+    validate_production_configuration(settings)
+
     if settings.SYSTEM_MODE == "SIMULATION":
         # Seed initial baseline state
         state_store.ingest_reading(
@@ -84,6 +98,8 @@ async def lifespan(app: FastAPI):
         await sim_task
     except asyncio.CancelledError:
         pass
+    # Shutdown live telemetry stream manager
+    await telemetry_stream_manager.shutdown()
 
 
 app = FastAPI(

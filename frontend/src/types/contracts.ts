@@ -233,3 +233,54 @@ export interface IncidentResponseContract {
   photos?: string[];
 }
 
+export type StreamConnectionStatus =
+  | 'CONNECTED'
+  | 'RECONNECTING'
+  | 'POLLING_FALLBACK'
+  | 'DISCONNECTED'
+  | 'ERROR';
+
+export type TelemetryStreamEventType =
+  | 'INIT'
+  | 'TELEMETRY'
+  | 'HEARTBEAT'
+  | 'PONG'
+  | 'FILTER_ACK'
+  | 'ERROR';
+
+export interface TelemetryStreamEvent {
+  event_id: string;
+  event_type: TelemetryStreamEventType;
+  timestamp: string;
+  sensor_id: string;
+  section_id: string;
+  source: DataSource;
+  operational_mode: string;
+  sensor_type: SensorType;
+  value: number;
+  unit: string;
+  water_level_cm?: number | null;
+  flow_rate_lpm?: number | null;
+  cumulative_volume_liters?: number | null;
+  sensor_status: SensorHealthStatus;
+  is_valid: boolean;
+  fault_code?: string | null;
+  hardware_validation_stage?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface StreamInitMessage {
+  event_type: 'INIT';
+  protocol_version: string;
+  client_id: string;
+  connection_time: string;
+  operational_mode: string;
+  hardware_validation_stage?: string | null;
+  latest_snapshot: Record<string, SensorReadingContract>;
+  subscribed_source?: string | null;
+  subscribed_sensor?: string | null;
+  message: string;
+  stream_config?: Record<string, unknown>;
+}
+
+

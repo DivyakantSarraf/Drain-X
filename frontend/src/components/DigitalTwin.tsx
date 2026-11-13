@@ -20,6 +20,7 @@ export interface DigitalTwinProps {
   gateDirective?: ActuatorDirectiveContract | null;
   readings?: Record<string, SensorReadingContract>;
   activeAlertsCount?: number;
+  hardwareValidationStage?: string | null;
 }
 
 export const DigitalTwin: React.FC<DigitalTwinProps> = ({
@@ -33,10 +34,15 @@ export const DigitalTwin: React.FC<DigitalTwinProps> = ({
   gateDirective = null,
   readings = {},
   activeAlertsCount = 0,
+  hardwareValidationStage = null,
 }) => {
   const [activeView, setActiveView] = useState<'flume' | 'gate' | 'dual'>('dual');
   const maxFlumeDepth = 15.0; // cm
   const criticalDepth = 12.0; // cm
+
+  const isPhysicalSource =
+    mode === 'HARDWARE' ||
+    Object.values(readings).some((r) => r.source === 'PHYSICAL');
 
   // SVG dimensions
   const svgWidth = 860;
@@ -147,6 +153,23 @@ export const DigitalTwin: React.FC<DigitalTwinProps> = ({
               {mechanism.is_jammed && (
                 <span className="px-2 py-1 rounded font-bold bg-rose-900 text-rose-200 border border-rose-700 flex items-center gap-1 text-[11px] animate-pulse">
                   <AlertOctagon className="w-3.5 h-3.5" /> STALL / JAM
+                </span>
+              )}
+
+              {/* Source & Hardware Validation Stage Badges */}
+              <span
+                className={`px-2 py-0.5 rounded border text-[10px] font-mono font-semibold ${
+                  isPhysicalSource
+                    ? 'bg-cyan-950/70 text-cyan-300 border-cyan-800'
+                    : 'bg-slate-800/80 text-slate-400 border-slate-700'
+                }`}
+              >
+                {isPhysicalSource ? 'PHYSICAL BENCH' : 'SIMULATION'}
+              </span>
+
+              {hardwareValidationStage && (
+                <span className="px-2 py-0.5 rounded bg-slate-800/80 text-amber-300 border border-slate-700 text-[10px] font-mono font-semibold">
+                  STAGE: {hardwareValidationStage}
                 </span>
               )}
             </div>

@@ -381,7 +381,7 @@ class _MunicipalIncidentDetailScreenState extends State<MunicipalIncidentDetailS
                                         value: team,
                                         child: Text(team, style: const TextStyle(fontSize: 12)),
                                       );
-                                    }).toList(),
+                                    }),
                                   ],
                                   onChanged: (val) {
                                     setState(() => _selectedAssignedTeam = val);

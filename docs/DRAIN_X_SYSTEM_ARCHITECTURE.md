@@ -1033,15 +1033,16 @@ The roadmap organizes DRAIN-X development into sequential, dependency-driven pha
 |                        DRAIN-X MASTER DEVELOPMENT PHASES                          |
 +-----------------------------------------------------------------------------------+
 |                                                                                   |
-|  PHASE P0: FOUNDATION & DEMONSTRATION RELIABILITY (Immediate)                     |
-|  • State store isolation mode (Pause sim loop when physical telemetry arrives)    |
-|  • Physical servo gate closed-loop feedback verification (Stall detection)        |
-|  • Digital filtering on ESP32 (5-sample median filter + rate-of-change clamp)     |
-|  • Centralize all hardcoded detection thresholds into config.py                   |
+|  PHASE P0: FIRMWARE, BACKEND & SCADA TWIN FOUNDATION (COMPLETED)                  |
+|  • P0.3A-G: ESP32 dual-sensor acquisition, manual gate servo, Wi-Fi telemetry     |
+|  • P0.4A-B: Persistence repository, historical queries & statistical rollups      |
+|  • P0.5A-C: WebSocket telemetry broadcasting, SCADA twin stream & time scrubbing  |
+|  • P0.6: Supabase Cloud PostgREST persistence, device registry & mode audit       |
+|  • P0.6.1: Security validation, cryptographic JWT, RLS & ESP32 key authentication|
 |                                                                                   |
-|  PHASE P1: HIGH-VALUE INTELLIGENCE & MULTI-ROLE EXPERIENCE                        |
-|  • Supabase Auth & PostgreSQL persistence with Row Level Security (RLS)           |
-|  • Wire Flutter 3-role mobile screens to live FastAPI endpoints                   |
+|  PHASE P1: HIGH-VALUE CLOUD DEPLOYMENT & MULTI-ROLE MOBILE EXPERIENCE             |
+|  • Production deployment on Vercel (Frontend) & Cloud Run / VPS (Backend)         |
+|  • Wire Flutter 3-role mobile screens (Citizen, Municipality, Worker) to live API |
 |  • Dynamic reach-based blockage localization across drainage channels             |
 |  • FYP-BOTNET data hygiene audit script & cost-sensitive class balancing          |
 |  • Multilingual plain-language alerts (MedTranslate) & privacy photo redaction    |

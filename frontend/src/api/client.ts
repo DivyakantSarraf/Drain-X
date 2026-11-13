@@ -187,4 +187,44 @@ export const apiClient = {
       body: JSON.stringify(payload),
     });
   },
+
+  async queryHistoricalTelemetry(options: {
+    sensor_id?: string;
+    source?: 'PHYSICAL' | 'SIMULATED';
+    section_id?: string;
+    start_time?: string;
+    end_time?: string;
+    limit?: number;
+    chronological?: boolean;
+  } = {}): Promise<{
+    status: string;
+    count: number;
+    sensor_id: string | null;
+    source_filter: string | null;
+    chronological: boolean;
+    is_truncated?: boolean;
+    truncation_warning?: string | null;
+    records: SensorReadingContract[];
+  }> {
+    const params = new URLSearchParams();
+    if (options.sensor_id) params.append('sensor_id', options.sensor_id);
+    if (options.source) params.append('source', options.source);
+    if (options.section_id) params.append('section_id', options.section_id);
+    if (options.start_time) params.append('start_time', options.start_time);
+    if (options.end_time) params.append('end_time', options.end_time);
+    if (options.limit !== undefined) params.append('limit', String(options.limit));
+    if (options.chronological !== undefined) params.append('chronological', String(options.chronological));
+
+    const queryString = params.toString() ? `?${params.toString()}` : '';
+    return request(`/telemetry/persistence/historical${queryString}`);
+  },
 };
+
+export {
+  TelemetryStreamClient,
+  streamEventToReading,
+  isReadingNewer,
+  getWebSocketStreamUrl,
+} from './streamClient';
+export type { StreamClientOptions } from './streamClient';
+

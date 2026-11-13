@@ -51,7 +51,13 @@ async def get_simulation_state():
 async def start_scenario(payload: StartScenarioPayload):
     """
     Launches a reproducible scenario (e.g. GRADUAL_DEBRIS, SUDDEN_BLOCKAGE, SUCCESSFUL_INTERVENTION).
+    Guarded: rejected with 409 Conflict if not in SIMULATION mode.
     """
+    if not state_store.is_simulation():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Simulation cannot be started while in {state_store.mode} mode. Transition mode to SIMULATION first.",
+        )
     scenario_runner.start_scenario(scenario=payload.scenario, seed=payload.seed)
     return {
         "status": "success",
@@ -70,6 +76,11 @@ async def stop_scenario():
 @router.post("/step", summary="Advance simulation by dt seconds")
 async def step_simulation(dt: float = Query(default=0.5, ge=0.05, le=5.0)):
     """Advances the simulation by dt seconds. Ideal for stepped experimentation."""
+    if not state_store.is_simulation():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Simulation cannot be stepped while in {state_store.mode} mode. Transition mode to SIMULATION first.",
+        )
     step_result = scenario_runner.step(dt=dt)
     return {
         "status": "success",

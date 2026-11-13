@@ -41,9 +41,13 @@ class ScenarioBenchmarkRunner:
         self.baseline_time_above_critical = 0.0
         self.drainx_false_alarms = 0
         self.baseline_false_alarms = 0
+        self.last_step_telemetry: list = []
 
     def start_scenario(self, scenario: ScenarioType, seed: Optional[int] = 42) -> None:
         """Initializes and begins execution of a specific scenario."""
+        if not state_store.is_simulation():
+            raise RuntimeError(f"Cannot start simulation scenario while in {state_store.mode} mode. Transition mode to SIMULATION first.")
+
         self.current_scenario = scenario
         self.seed = seed
         self.simulation_time_s = 0.0
@@ -65,6 +69,7 @@ class ScenarioBenchmarkRunner:
         self.baseline_time_above_critical = 0.0
         self.drainx_false_alarms = 0
         self.baseline_false_alarms = 0
+        self.last_step_telemetry: list = []
 
         # Scenario initial conditions
         if scenario == ScenarioType.CLEAN_DRAINAGE:
@@ -103,7 +108,15 @@ class ScenarioBenchmarkRunner:
         """
         Executes a discrete time-step of the active scenario.
         Updates hydraulics, mechanism kinematics, analytics, fault detection, and benchmarking.
+        Inhibited if system is not in SIMULATION mode.
         """
+        if not state_store.is_simulation():
+            return {
+                "time_s": self.simulation_time_s,
+                "scenario": self.current_scenario.value if self.current_scenario else "NONE",
+                "status": "INHIBITED_NON_SIMULATION_MODE",
+            }
+
         if not self.is_running and self.current_scenario is not None:
             return {
                 "time_s": self.simulation_time_s,
@@ -161,6 +174,7 @@ class ScenarioBenchmarkRunner:
 
         # 3. Generate & Ingest Telemetry
         telemetry = self.channel.generate_telemetry()
+        self.last_step_telemetry = telemetry
         for reading in telemetry:
             state_store.ingest_reading(reading)
             # Run Fault Detection on reading

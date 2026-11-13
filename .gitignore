@@ -13,3 +13,10 @@
 
 # User-uploaded incident evidence
 backend/uploads/
+
+# Firmware secrets
+firmware/include/secrets.h
+**/secrets.h
+**/.env
+**/.env.*
+!**/.env.example

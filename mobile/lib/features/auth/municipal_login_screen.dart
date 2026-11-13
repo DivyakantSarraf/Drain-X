@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import '../../core/theme/app_theme.dart';
 import '../municipal/municipal_dashboard_screen.dart';
 
 class MunicipalLoginScreen extends StatefulWidget {

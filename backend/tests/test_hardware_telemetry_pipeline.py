@@ -1,3 +1,4 @@
+import pytest
 from datetime import datetime, timezone, timedelta
 from fastapi.testclient import TestClient
 from app.services.state_store import state_store
@@ -10,6 +11,14 @@ from app.models.contracts import (
     PredictionState,
     AlertSeverity,
 )
+
+
+@pytest.fixture(autouse=True)
+def ensure_physical_mode():
+    """Ensure the hardware telemetry test suite runs in PHYSICAL mode."""
+    state_store.set_mode("PHYSICAL", reason="test_hardware_telemetry_pipeline execution")
+    yield
+    state_store.set_mode("SIMULATION", reason="test_hardware_telemetry_pipeline cleanup")
 
 
 def test_physical_telemetry_ingest_executes_analytics(client: TestClient):
