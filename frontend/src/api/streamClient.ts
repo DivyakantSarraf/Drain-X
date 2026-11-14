@@ -28,6 +28,19 @@ export function getWebSocketStreamUrl(
   sensorFilter?: string | null,
   token?: string | null
 ): string {
+  const configuredWsBase = typeof import.meta !== 'undefined' && import.meta.env
+    ? (import.meta.env.VITE_WS_BASE_URL as string | undefined)
+    : undefined;
+
+  if (configuredWsBase) {
+    const trimmedBase = configuredWsBase.replace(/\/+$/, '');
+    const wsUrl = new URL(`${trimmedBase}${path.startsWith('/') ? path : '/' + path}`);
+    if (sourceFilter) wsUrl.searchParams.set('source', sourceFilter);
+    if (sensorFilter) wsUrl.searchParams.set('sensor_id', sensorFilter);
+    if (token) wsUrl.searchParams.set('token', token);
+    return wsUrl.toString();
+  }
+
   if (typeof window === 'undefined' || !window.location) {
     const params = new URLSearchParams();
     if (sourceFilter) params.set('source', sourceFilter);

@@ -14,7 +14,8 @@ import {
   IncidentUpdateContract,
 } from '../types/contracts';
 
-const API_BASE = '/api/v1';
+const RAW_API_BASE = import.meta.env.VITE_API_BASE_URL;
+const API_BASE = RAW_API_BASE ? RAW_API_BASE.replace(/\/+$/, '') + '/api/v1' : '/api/v1';
 
 export class ApiError extends Error {
   constructor(

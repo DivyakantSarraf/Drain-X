@@ -27,6 +27,7 @@ class Settings(BaseSettings):
         "http://127.0.0.1:5173",
         "http://localhost:3000",
     ]
+    ADDITIONAL_CORS_ORIGINS: str | None = None  # Comma-separated extra allowed origins for staging/production
 
     # Database & Supabase Cloud Settings (Optional for local operation; falls back to in-memory)
     DATABASE_URL: str | None = None
@@ -34,7 +35,8 @@ class Settings(BaseSettings):
     SUPABASE_KEY: str | None = None  # Anon / Client key
     SUPABASE_SERVICE_ROLE_KEY: str | None = None  # Backend-only privileged key for persistence
     SUPABASE_AUTH_ENABLED: bool = False  # Set to True to enforce JWT authentication on protected routes
-    SUPABASE_JWT_SECRET: str | None = None  # Secret for validating Supabase JWT signatures
+    SUPABASE_JWT_SECRET: str | None = None  # Secret for validating legacy/symmetric HS256 Supabase JWT signatures
+    SUPABASE_JWKS_CACHE_TTL_SEC: int = 3600  # Cache duration for fetched Supabase Auth JWKS keys
     DEVICE_INGEST_API_KEY: str | None = None  # Optional API key for ESP32/Edge hardware authentication
     PERSISTENCE_TIMEOUT_SEC: float = 3.0  # HTTP timeout for Supabase PostgREST calls
 
@@ -76,6 +78,9 @@ def validate_production_configuration(cfg: Settings) -> None:
     """
     Validates that production environments fail closed if critical
     security, authentication, or persistence parameters are missing.
+    Supports either:
+    1. Modern asymmetric ES256 via trusted Supabase JWKS (requires SUPABASE_URL).
+    2. Legacy symmetric HS256 (requires SUPABASE_JWT_SECRET >= 16 chars).
     """
     if cfg.ENVIRONMENT != "production":
         return
@@ -89,8 +94,16 @@ def validate_production_configuration(cfg: Settings) -> None:
         errors.append("SUPABASE_URL must be configured in production.")
     if not cfg.SUPABASE_SERVICE_ROLE_KEY and not cfg.SUPABASE_KEY:
         errors.append("SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY must be configured in production.")
-    if not cfg.SUPABASE_JWT_SECRET or len(cfg.SUPABASE_JWT_SECRET.strip()) < 16:
-        errors.append("SUPABASE_JWT_SECRET must be configured with at least 16 characters in production for HS256 validation.")
+
+    # JWT Verification validation: Must have either SUPABASE_URL (for ES256 JWKS) or SUPABASE_JWT_SECRET (for HS256)
+    has_jwks_provider = bool(cfg.SUPABASE_URL and cfg.SUPABASE_URL.strip().startswith("https://"))
+    has_hs256_secret = bool(cfg.SUPABASE_JWT_SECRET and len(cfg.SUPABASE_JWT_SECRET.strip()) >= 16)
+
+    if not has_jwks_provider and not has_hs256_secret:
+        errors.append(
+            "Production JWT verification requires either a valid HTTPS SUPABASE_URL (for ES256 JWKS) "
+            "or a SUPABASE_JWT_SECRET with at least 16 characters (for HS256)."
+        )
 
     if errors:
         error_msg = "FATAL PRODUCTION CONFIGURATION FAIL-CLOSED ERROR:\n - " + "\n - ".join(errors)

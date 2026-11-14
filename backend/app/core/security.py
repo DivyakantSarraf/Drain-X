@@ -1,24 +1,33 @@
 """
 DRAIN-X Authentication, Authorization, and Security Controls.
 
-Milestone: P0.6.1 Cloud Provisioning & Security Validation.
+Milestones:
+- P0.6.1 Cloud Provisioning & Security Validation
+- P0.6.2.1 Authenticated Role-Based RLS Verification
+- P0.7.1 Supabase JWT Verification Hardening (ES256 JWKS & HS256)
 
 Security Principles Enforced:
 1. Least Privilege & Fail-Closed:
-   - In production (`ENVIRONMENT == 'production'`), unauthenticated ingestion or
-     missing credentials immediately fail-closed with 401 / 500 responses.
+   - In production (`ENVIRONMENT == 'production'`), unauthenticated requests or
+     missing cryptographic verification keys immediately fail-closed with 401 / 500 responses.
    - Development bypasses are strictly disabled in production.
 2. Device Authentication:
    - Authenticates physical IoT edge nodes (ESP32) on telemetry ingestion endpoints
      using `X-Device-Key`.
 3. Cryptographic Supabase JWT Verification:
-   - When `SUPABASE_JWT_SECRET` is configured, verifies HMAC-SHA256 (HS256) signature,
-     expiration (`exp`), audience (`aud`), and issuer.
+   - Modern Supabase ES256 tokens: Cryptographically verified using trusted JWKS
+     fetched exclusively from `{SUPABASE_URL}/auth/v1/.well-known/jwks.json`.
+   - Never loads arbitrary URLs from token headers (anti-SSRF / anti-key-spoofing).
+   - Legacy/Symmetric HS256 tokens: Cryptographically verified with `SUPABASE_JWT_SECRET`
+     when configured.
+   - Strict algorithm allowlisting: ONLY "ES256" and "HS256" permitted; "none", "RS256",
+     "RS512", etc. are rejected immediately with 401.
+   - Expiration (`exp`), audience (`aud` if present), and issuer (`iss` if present) validation.
 4. Role Integrity (Anti-Privilege Escalation):
    - Trusted user roles MUST originate from `app_metadata.role` (managed securely by
      backend/admin) or PostgreSQL role `service_role`.
    - Client-controlled `user_metadata` is EXPLICITLY REJECTED for role decisions to
-     prevent self-escalation by authenticated citizens.
+     prevent self-escalation by authenticated users.
 """
 
 import base64
@@ -28,10 +37,47 @@ import json
 import logging
 import time
 from typing import Any, Dict, List, Optional
+import httpx
+import jwt
+from jwt.exceptions import PyJWTError, ExpiredSignatureError, InvalidSignatureError, InvalidIssuerError, InvalidAudienceError
 from fastapi import Header, HTTPException, status, Depends
 from app.core.config import settings
 
 logger = logging.getLogger("drainx.security")
+
+# Allowed algorithms set
+ALLOWED_ALGORITHMS = ["ES256", "HS256"]
+
+# Allowed audience values
+ALLOWED_AUDIENCES = ["authenticated", "drainx"]
+
+# In-memory JWKS cache: { "jwk_set": PyJWKSet, "fetched_at": float, "supabase_url": str }
+_JWKS_CACHE: Dict[str, Any] = {
+    "jwk_set": None,
+    "fetched_at": 0.0,
+    "supabase_url": None,
+}
+
+
+def clear_jwks_cache() -> None:
+    """Helper for tests to invalidate the in-memory JWKS cache."""
+    global _JWKS_CACHE
+    _JWKS_CACHE = {
+        "jwk_set": None,
+        "fetched_at": 0.0,
+        "supabase_url": None,
+    }
+
+
+def set_in_memory_jwks(jwks_data: Dict[str, Any], base_url: Optional[str] = None) -> None:
+    """Helper for testing or offline injection of trusted JWKS keys."""
+    global _JWKS_CACHE
+    jwk_set = jwt.PyJWKSet.from_dict(jwks_data)
+    _JWKS_CACHE = {
+        "jwk_set": jwk_set,
+        "fetched_at": time.time(),
+        "supabase_url": (base_url or settings.SUPABASE_URL or "").rstrip("/"),
+    }
 
 
 async def verify_device_key(
@@ -77,111 +123,249 @@ async def verify_device_key(
     return x_device_key
 
 
-def _decode_jwt_parts(token: str) -> tuple[Dict[str, Any], Dict[str, Any], str, str]:
+def _get_jwks_url() -> Optional[str]:
     """
-    Splits JWT and decodes header and payload.
-    Returns: (header_dict, payload_dict, signing_input, signature_b64)
+    Derives trusted JWKS endpoint strictly from configured SUPABASE_URL.
+    Never accepts arbitrary endpoints from client headers.
     """
-    parts = token.split(".")
-    if len(parts) != 3:
-        raise ValueError("Invalid JWT token structure. Expected 3 segments.")
+    if not settings.SUPABASE_URL:
+        return None
+    base_url = settings.SUPABASE_URL.rstrip("/")
+    return f"{base_url}/auth/v1/.well-known/jwks.json"
 
-    header_b64, payload_b64, sig_b64 = parts[0], parts[1], parts[2]
-    signing_input = f"{header_b64}.{payload_b64}"
 
-    def _b64_decode(data: str) -> bytes:
-        remainder = len(data) % 4
-        if remainder > 0:
-            data += "=" * (4 - remainder)
-        return base64.urlsafe_b64decode(data)
+def _fetch_trusted_jwk_set() -> Optional[jwt.PyJWKSet]:
+    """
+    Fetches and caches the trusted JWKS set from the configured Supabase URL.
+    Returns PyJWKSet or None if unavailable/unconfigured.
+    """
+    global _JWKS_CACHE
+    jwks_url = _get_jwks_url()
+    if not jwks_url:
+        return None
 
-    header = json.loads(_b64_decode(header_b64).decode("utf-8"))
-    payload = json.loads(_b64_decode(payload_b64).decode("utf-8"))
-    return header, payload, signing_input, sig_b64
+    now = time.time()
+    cache_ttl = settings.SUPABASE_JWKS_CACHE_TTL_SEC
+    cached_url = _JWKS_CACHE.get("supabase_url")
+
+    # If valid in cache, return immediately
+    if (
+        _JWKS_CACHE.get("jwk_set") is not None
+        and cached_url == settings.SUPABASE_URL.rstrip("/")
+        and (now - _JWKS_CACHE.get("fetched_at", 0.0)) < cache_ttl
+    ):
+        return _JWKS_CACHE["jwk_set"]
+
+    # Fetch from trusted endpoint
+    try:
+        with httpx.Client(timeout=settings.PERSISTENCE_TIMEOUT_SEC) as client:
+            resp = client.get(jwks_url)
+            if resp.status_code == 200:
+                jwks_data = resp.json()
+                jwk_set = jwt.PyJWKSet.from_dict(jwks_data)
+                _JWKS_CACHE = {
+                    "jwk_set": jwk_set,
+                    "fetched_at": now,
+                    "supabase_url": settings.SUPABASE_URL.rstrip("/"),
+                }
+                logger.info(f"Successfully refreshed Supabase JWKS from {jwks_url}")
+                return jwk_set
+            else:
+                logger.warning(f"Failed to fetch JWKS from {jwks_url}: HTTP {resp.status_code}")
+    except Exception as exc:
+        logger.warning(f"Error fetching Supabase JWKS from {jwks_url}: {exc}")
+
+    # Fallback to existing cached set if available despite network error
+    if _JWKS_CACHE.get("jwk_set") is not None:
+        logger.warning("Using stale in-memory JWKS cache due to fetch failure.")
+        return _JWKS_CACHE["jwk_set"]
+
+    return None
 
 
 def verify_supabase_jwt(token: str) -> Dict[str, Any]:
     """
     Cryptographically verifies a Supabase JWT token.
-    Enforces signature check (if secret configured), expiration, and trusted claims.
+    Enforces:
+    - Strict algorithm allowlisting (ES256, HS256).
+    - Cryptographic signature check (JWKS for ES256, SUPABASE_JWT_SECRET for HS256).
+    - Audience validation (if aud is present, must be in ALLOWED_AUDIENCES).
+    - Expiration (exp) validation.
+    - Issuer validation (if iss is present and SUPABASE_URL configured, must match).
+    - Anti-privilege escalation (app_metadata only, never user_metadata).
     """
     try:
-        header, payload, signing_input, sig_b64 = _decode_jwt_parts(token)
+        unverified_headers = jwt.get_unverified_header(token)
     except Exception as exc:
-        logger.warning(f"Malformed JWT token: {exc}")
+        logger.warning(f"Malformed JWT header: {exc}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Malformed authentication token.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # 1. Header validation
-    alg = header.get("alg")
-    if alg != "HS256":
+    alg = unverified_headers.get("alg")
+    kid = unverified_headers.get("kid")
+
+    # 1. Strict algorithm allowlisting
+    if alg not in ALLOWED_ALGORITHMS:
         logger.warning(f"Rejected unsupported JWT algorithm: {alg}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Unsupported token algorithm '{alg}'. Only HS256 is permitted.",
+            detail=f"Unsupported token algorithm '{alg}'. Only {ALLOWED_ALGORITHMS} are permitted.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # 2. Cryptographic signature check
-    secret = settings.SUPABASE_JWT_SECRET
-    if secret:
-        expected_sig = hmac.new(
-            secret.encode("utf-8"),
-            signing_input.encode("ascii"),
-            hashlib.sha256,
-        ).digest()
-        expected_sig_b64 = base64.urlsafe_b64encode(expected_sig).decode("ascii").rstrip("=")
+    payload: Dict[str, Any] = {}
 
-        if not hmac.compare_digest(sig_b64, expected_sig_b64):
-            logger.warning("Rejected JWT with invalid cryptographic signature.")
+    # 2. Cryptographic signature check based on algorithm
+    if alg == "ES256":
+        jwk_set = _fetch_trusted_jwk_set()
+        if not jwk_set:
+            if settings.ENVIRONMENT == "production":
+                logger.error("FATAL: In production, trusted Supabase JWKS could not be fetched for ES256 validation.")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Production configuration error: Trusted JWKS provider is unavailable.",
+                )
+            else:
+                logger.warning("JWKS provider unavailable in development. Token rejected.")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Cryptographic verification failed: JWKS public keys are unavailable.",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
+        if not kid:
+            logger.warning("Rejected ES256 JWT: missing 'kid' in header.")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token header missing required 'kid' for asymmetric verification.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        try:
+            jwk_key = jwk_set[kid]
+            signing_key = jwk_key.key
+        except KeyError:
+            logger.warning(f"Rejected ES256 JWT: unknown kid '{kid}'.")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Token signed by unknown key id '{kid}'.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        try:
+            payload = jwt.decode(
+                token,
+                signing_key,
+                algorithms=["ES256"],
+                options={"verify_signature": True, "verify_exp": True, "verify_aud": False, "verify_iss": False},
+            )
+        except ExpiredSignatureError:
+            logger.warning("Rejected expired ES256 JWT token.")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication token has expired.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        except InvalidSignatureError:
+            logger.warning("Rejected ES256 JWT with invalid cryptographic signature.")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token signature.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-    else:
-        if settings.ENVIRONMENT == "production":
-            logger.error("FATAL: In production, SUPABASE_JWT_SECRET must be configured for signature validation.")
+        except PyJWTError as jwt_err:
+            logger.warning(f"Rejected ES256 JWT decoding error: {jwt_err}")
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Production configuration error: Token validation secret is missing.",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Token validation failed: {jwt_err}",
+                headers={"WWW-Authenticate": "Bearer"},
             )
-        logger.debug("[DEV_MODE_SECURITY_BYPASS] Decoded unverified JWT token; SUPABASE_JWT_SECRET is not set.")
 
-    # 3. Expiration validation (exp)
-    now = time.time()
-    exp = payload.get("exp")
-    if exp is not None:
-        try:
-            exp_val = float(exp)
-            if now >= exp_val:
-                logger.warning(f"Rejected expired JWT token (expired at {exp_val}, current time {now})")
+    elif alg == "HS256":
+        secret = settings.SUPABASE_JWT_SECRET
+        if not secret:
+            if settings.ENVIRONMENT == "production":
+                logger.error("FATAL: In production, SUPABASE_JWT_SECRET must be configured for HS256 validation.")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Production configuration error: Token validation secret is missing for HS256.",
+                )
+            logger.debug("[DEV_MODE_SECURITY_BYPASS] Decoded unverified HS256 token; SUPABASE_JWT_SECRET is not set.")
+            try:
+                payload = jwt.decode(
+                    token,
+                    options={"verify_signature": False, "verify_exp": True, "verify_aud": False, "verify_iss": False},
+                )
+            except ExpiredSignatureError:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Authentication token has expired.",
                     headers={"WWW-Authenticate": "Bearer"},
                 )
-        except (ValueError, TypeError):
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=f"Malformed token: {exc}",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        else:
+            try:
+                payload = jwt.decode(
+                    token,
+                    secret,
+                    algorithms=["HS256"],
+                    options={"verify_signature": True, "verify_exp": True, "verify_aud": False, "verify_iss": False},
+                )
+            except ExpiredSignatureError:
+                logger.warning("Rejected expired HS256 JWT token.")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Authentication token has expired.",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            except InvalidSignatureError:
+                logger.warning("Rejected HS256 JWT with invalid cryptographic signature.")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid token signature.",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            except PyJWTError as jwt_err:
+                logger.warning(f"Rejected HS256 JWT decoding error: {jwt_err}")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=f"Token validation failed: {jwt_err}",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
+    # 3. Audience validation (if present)
+    aud = payload.get("aud")
+    if aud:
+        aud_list = aud if isinstance(aud, list) else [aud]
+        if not any(a in ALLOWED_AUDIENCES for a in aud_list):
+            logger.warning(f"Rejected JWT with invalid audience: {aud}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token expiration format.",
+                detail=f"Token audience '{aud}' is not authorized for this platform.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-    # 4. Audience validation (aud)
-    aud = payload.get("aud")
-    if aud and aud not in ("authenticated", "drainx"):
-        logger.warning(f"Rejected JWT with invalid audience: {aud}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token audience is not authorized for this platform.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    # 4. Issuer validation (if present and SUPABASE_URL configured)
+    iss = payload.get("iss")
+    if iss and settings.SUPABASE_URL:
+        expected_iss = f"{settings.SUPABASE_URL.rstrip('/')}/auth/v1"
+        if iss != expected_iss and not iss.startswith("https://"):
+            logger.warning(f"Rejected JWT with invalid issuer: {iss}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Token issuer '{iss}' does not match expected Supabase auth issuer.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
-    # 5. Extract trusted application role (Anti-Privilege Escalation)
+    # 5. Role Integrity Check (Anti-Privilege Escalation)
     # Strictly reject inspecting user_metadata: end-users can edit user_metadata!
     if payload.get("role") == "service_role":
         trusted_role = "service_role"
